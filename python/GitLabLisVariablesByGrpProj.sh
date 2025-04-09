@@ -2,7 +2,7 @@ import requests
 import os
 import sys
 import time
-
+# juts for tests
 # --- Configuration ---
 # Your GitLab instance URL (e.g., "https://gitlab.com" or your self-hosted URL)
 GITLAB_URL = "https://gitlab.com"

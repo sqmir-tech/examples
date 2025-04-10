@@ -1,0 +1,28 @@
+Main Playbook (get_netbox_ips_per_host.yml):
+
+Reads the list of dictionaries from hostnames.json into host_prefix_list.
+Initializes an empty list proposed_assignments.
+Loops through each dictionary (host_info) in host_prefix_list.
+For each host_info, it calls the tasks defined in process_single_host.yml using include_tasks. This keeps the main playbook clean.
+Finally, it prints the accumulated proposed_assignments list as JSON.
+Task File (process_single_host.yml):
+
+This file receives the host_info dictionary for the current iteration.
+block:
+Tries to find the NetBox Prefix ID for host_info.prefix. Uses assert to fail clearly if not found exactly once.
+Tries to request the next available IP using the found current_prefix_id. Uses assert to check the response format.
+If both API calls succeed, it creates a current_result dictionary containing the hostname, prefix, the proposed IP, and a "Success" status.
+rescue:
+If any task in the block fails (due to assert failing or an API error like 404, 400, 500, prefix full resulting in non-201 status), this section runs.
+It creates a current_result dictionary indicating failure, including the hostname, prefix, null for the IP, a "Failed" status, and captures the error message (ansible_failed_result.msg).
+always:
+This runs regardless of success or failure within the block/rescue.
+It takes the current_result dictionary (which represents either success or failure for the current host_info) and appends it to the main proposed_assignments list (which was initialized in the main playbook).
+How to Run:
+
+Save: Save the main playbook code as get_netbox_ips_per_host.yml.
+Save: Save the second code block as process_single_host.yml in the same directory.
+Create/Update hostnames.json: Ensure your hostnames.json file exists in the same directory and uses the new format (list of dictionaries with "hostname" and "prefix").
+Set Variables: Update netbox_url, netbox_api_token, and validate_certs in get_netbox_ips_per_host.yml.
+Execute: Run the main playbook:
+Bash

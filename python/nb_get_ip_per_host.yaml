@@ -1,0 +1,133 @@
+---
+- name: Get Next Available IP per Hostname/Prefix from NetBox
+  hosts: localhost
+  connection: local
+  gather_facts: no
+
+  vars:
+    netbox_url: "YOUR_NETBOX_URL" # e.g., "https://netbox.yourcompany.com"
+    netbox_api_token: "YOUR_NETBOX_API_TOKEN" # Store securely, e.g., using Ansible Vault
+    # target_prefix_cidr is removed - prefix comes from the JSON file now
+    hostnames_json_file: "hostnames.json" # <-- Path to your JSON file with hostname-prefix pairs
+    validate_certs: yes # Set to 'no' if using self-signed certs (use with caution)
+
+  tasks:
+    - name: Fail if NetBox URL or Token are not set
+      ansible.builtin.fail:
+        msg: "Please set netbox_url and netbox_api_token variables."
+      when: netbox_url == "YOUR_NETBOX_URL" or netbox_api_token == "YOUR_NETBOX_API_TOKEN"
+
+    - name: Read hostname and prefix data from JSON file
+      ansible.builtin.vars:
+        # Reads the list of dictionaries from the JSON file
+        host_prefix_list: "{{ lookup('file', hostnames_json_file) | from_json }}"
+      delegate_to: localhost
+
+    - name: Initialize list for results
+      ansible.builtin.set_fact:
+        proposed_assignments: []
+
+    - name: Process each hostname and its specified prefix
+      loop: "{{ host_prefix_list }}" # Loop over the list of dictionaries
+      loop_control:
+        loop_var: host_info # Variable holding the current dict {'hostname': ..., 'prefix': ...}
+        label: "{{ host_info.hostname }} ({{ host_info.prefix }})" # Nicer loop output label
+      ansible.builtin.include_tasks: process_single_host.yml # Delegate processing to a separate file for clarity
+
+    - name: Display Proposed Hostname-IP Assignments (JSON)
+      ansible.builtin.debug:
+        msg: "{{ proposed_assignments | to_json }}"
+
+# ===========================================================
+# Separate Task File: process_single_host.yml
+# ===========================================================
+# This file is included by the main playbook for each host entry.
+# It isolates the logic for finding prefix ID and getting the next IP.
+---
+- name: "Processing {{ host_info.hostname }} in prefix {{ host_info.prefix }}"
+  block:
+    - name: Check if hostname and prefix are defined
+      ansible.builtin.assert:
+        that:
+          - host_info.hostname is defined
+          - host_info.hostname | length > 0
+          - host_info.prefix is defined
+          - host_info.prefix | length > 0
+        fail_msg: "Input entry must contain non-empty 'hostname' and 'prefix' keys. Entry: {{ host_info }}"
+        quiet: yes # Only show msg on failure
+
+    - name: Find the NetBox Prefix ID for {{ host_info.prefix }}
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/prefixes/?prefix={{ host_info.prefix | urlencode }}"
+        method: GET
+        headers:
+          Authorization: "Token {{ netbox_api_token }}"
+          Accept: "application/json"
+        validate_certs: "{{ validate_certs }}"
+        status_code: 200
+        return_content: yes
+      register: prefix_lookup_result
+      no_log: true # Avoid logging token in headers
+
+    - name: Verify Prefix was found uniquely
+      ansible.builtin.assert:
+        that:
+          - prefix_lookup_result.json is defined
+          - prefix_lookup_result.json.count == 1
+        fail_msg: "Error finding prefix '{{ host_info.prefix }}'. Found {{ prefix_lookup_result.json.count | default('unknown') }} results. Response: {{ prefix_lookup_result.json | default(prefix_lookup_result.content) }}"
+        quiet: yes # Only show msg on failure
+
+    - name: Extract Prefix ID
+      ansible.builtin.set_fact:
+        current_prefix_id: "{{ prefix_lookup_result.json.results[0].id }}"
+
+    - name: Request next available IP in prefix ID {{ current_prefix_id }}
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/prefixes/{{ current_prefix_id }}/available-ips/"
+        method: POST
+        headers:
+          Authorization: "Token {{ netbox_api_token }}"
+          Content-Type: "application/json"
+          Accept: "application/json"
+        body: "{}"
+        body_format: json
+        validate_certs: "{{ validate_certs }}"
+        status_code: 201
+        return_content: yes
+      register: next_ip_result
+      no_log: true
+
+    - name: Verify IP address structure in response
+      ansible.builtin.assert:
+        that:
+          - next_ip_result.json is defined
+          - next_ip_result.json.address is defined
+        fail_msg: "NetBox response for next available IP did not contain expected 'address' field. Status: {{ next_ip_result.status }}. Response: {{ next_ip_result.json | default(next_ip_result.content) }}"
+        quiet: yes # Only show msg on failure
+
+    - name: Prepare successful result entry
+      ansible.builtin.set_fact:
+        # Extract only the IP part from the CIDR string (e.g., "192.168.1.5/24" -> "192.168.1.5")
+        current_result:
+          hostname: "{{ host_info.hostname }}"
+          prefix: "{{ host_info.prefix }}"
+          proposed_ip: "{{ next_ip_result.json.address | split('/') | first }}"
+          status: "Success"
+
+  rescue:
+    # This block runs if any task in the 'block' above fails
+    - name: Record failure for {{ host_info.hostname }}
+      ansible.builtin.set_fact:
+        current_result:
+          hostname: "{{ host_info.hostname }}"
+          prefix: "{{ host_info.prefix }}"
+          proposed_ip: null
+          status: "Failed"
+          error_message: "{{ ansible_failed_result.msg | default('Error during processing - check playbook logs for details.') }}"
+
+  always:
+    # This block runs whether the 'block' succeeded or failed in 'rescue'
+    - name: Append result to the main list
+      ansible.builtin.set_fact:
+        # Add the 'current_result' (either success or failure structure) to the list
+        proposed_assignments: "{{ proposed_assignments + [current_result] }}"

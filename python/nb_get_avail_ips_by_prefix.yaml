@@ -1,0 +1,98 @@
+---
+- name: Get Next Available IPs with Hostnames from NetBox Prefix
+  hosts: localhost
+  connection: local
+  gather_facts: no
+
+  vars:
+    netbox_url: "YOUR_NETBOX_URL" # e.g., "https://netbox.yourcompany.com"
+    netbox_api_token: "YOUR_NETBOX_API_TOKEN" # Store securely, e.g., using Ansible Vault
+    target_prefix_cidr: "192.168.1.0/24" # <-- CHANGE THIS to your target prefix
+    hostnames_json_file: "hostnames.json" # <-- CHANGE THIS path if needed
+    validate_certs: yes # Set to 'no' if using self-signed certs (use with caution)
+
+  tasks:
+    - name: Fail if NetBox URL or Token are not set
+      ansible.builtin.fail:
+        msg: "Please set netbox_url and netbox_api_token variables."
+      when: netbox_url == "YOUR_NETBOX_URL" or netbox_api_token == "YOUR_NETBOX_API_TOKEN"
+
+    - name: Read hostnames from JSON file
+      ansible.builtin.vars:
+        hostnames_list: "{{ lookup('file', hostnames_json_file) | from_json }}"
+      delegate_to: localhost
+
+    - name: Find the NetBox Prefix ID for {{ target_prefix_cidr }}
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/prefixes/?prefix={{ target_prefix_cidr | urlencode }}"
+        method: GET
+        headers:
+          Authorization: "Token {{ netbox_api_token }}"
+          Accept: "application/json"
+        validate_certs: "{{ validate_certs }}"
+        status_code: 200
+        return_content: yes
+      register: prefix_info
+      no_log: true
+
+    - name: Fail if Prefix not found or multiple found
+      ansible.builtin.fail:
+        msg: "Error finding prefix '{{ target_prefix_cidr }}'. Found {{ prefix_info.json.count }} results. Response: {{ prefix_info.json }}"
+      when: prefix_info.json.count != 1
+
+    - name: Extract Prefix ID
+      ansible.builtin.set_fact:
+        netbox_prefix_id: "{{ prefix_info.json.results[0].id }}"
+
+    - name: Display Prefix ID found
+      ansible.builtin.debug:
+        msg: "Found NetBox Prefix ID: {{ netbox_prefix_id }} for {{ target_prefix_cidr }}"
+
+    - name: Request next available IP for each hostname
+      ansible.builtin.uri:
+        url: "{{ netbox_url }}/api/ipam/prefixes/{{ netbox_prefix_id }}/available-ips/"
+        method: POST
+        headers:
+          Authorization: "Token {{ netbox_api_token }}"
+          Content-Type: "application/json"
+          Accept: "application/json"
+        body: "{}"
+        body_format: json
+        validate_certs: "{{ validate_certs }}"
+        status_code: 201
+        return_content: yes
+      loop: "{{ hostnames_list }}"
+      loop_control:
+        loop_var: current_hostname # Name the loop variable for clarity
+      register: next_ip_results
+      ignore_errors: true # Continue loop even if one request fails (e.g., prefix full)
+      no_log: true
+
+    # --- MODIFIED SECTION START ---
+    - name: Aggregate proposed Hostname-IP mapping
+      ansible.builtin.set_fact:
+        # Append a dictionary with hostname and IP to the list for each successful result
+        proposed_hostname_ip_map: >-
+          {{ proposed_hostname_ip_map | default([]) +
+             [{'hostname': item.item, 'ip': item.json.address | split('/') | first }] }}
+      loop: "{{ next_ip_results.results }}" # Loop through the results of the previous task
+      when:
+        - item.status == 201 # Only process successful requests
+        - item.json is defined # Ensure response body exists
+        - item.json.address is defined # Ensure address key exists in response
+      loop_control:
+        label: "{{ item.item }}" # Label loop output with the hostname (original item looped over)
+    # --- MODIFIED SECTION END ---
+
+    - name: Handle failed IP requests
+      ansible.builtin.debug:
+        msg: "Warning: Failed to get IP for hostname '{{ item.item }}'. Status: {{ item.status }}. Response: {{ item.content | default('No Content') }}. Prefix might be full."
+      loop: "{{ next_ip_results.results }}"
+      when: item.status != 201 or item.json is not defined or item.json.address is not defined
+
+    # --- MODIFIED SECTION START ---
+    - name: Display Proposed Hostname-IP Map (JSON)
+      ansible.builtin.debug:
+        # Output the list of dictionaries we built, defaulting to empty list if none were successful
+        msg: "{{ proposed_hostname_ip_map | default([]) | to_json }}"
+    # --- MODIFIED SECTION END ---

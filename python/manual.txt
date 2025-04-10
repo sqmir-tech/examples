@@ -25,4 +25,27 @@ Save: Save the second code block as process_single_host.yml in the same director
 Create/Update hostnames.json: Ensure your hostnames.json file exists in the same directory and uses the new format (list of dictionaries with "hostname" and "prefix").
 Set Variables: Update netbox_url, netbox_api_token, and validate_certs in get_netbox_ips_per_host.yml.
 Execute: Run the main playbook:
-Bash
+
+
+[
+  {
+    "hostname": "webserver-prod-01",
+    "prefix": "192.168.1.0/24"
+  },
+  {
+    "hostname": "dbserver-prod-01",
+    "prefix": "192.168.1.0/24"
+  },
+  {
+    "hostname": "appserver-dev-05",
+    "prefix": "10.15.20.0/25"
+  },
+  {
+    "hostname": "monitoring-server",
+    "prefix": "192.168.100.0/24"
+  },
+  {
+    "hostname": "legacy-system",
+    "prefix": "172.16.5.0/26"
+  }
+]
